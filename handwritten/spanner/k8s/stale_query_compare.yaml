@@ -1,0 +1,168 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: spanner-ns
+  name: irahul-node-stale-query-current
+  labels:
+    workload: stale-query
+    client: nodejs-spanner
+    comparison: current
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: irahul-node-stale-query-current
+  template:
+    metadata:
+      labels:
+        app: irahul-node-stale-query-current
+        workload: stale-query
+        client: nodejs-spanner
+        comparison: current
+    spec:
+      containers:
+        - name: stale-query
+          image: us-central1-docker.pkg.dev/span-cloud-testing/irahul-images/irahul-node-client:current
+          imagePullPolicy: Always
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          env:
+            - name: PROBE_TYPE
+              value: "stale_query"
+            - name: QPS
+              value: "400"
+            - name: OTEL_SERVICE_NAME
+              value: "irahul-node-stale-query-current"
+            - name: COMPARISON_LABEL
+              value: "current"
+            # Current-branch experiment: force 10 independent native gRPC channels.
+            # In this branch, SPANNER_NUM_CHANNELS disables grpc-gcp.
+            - name: SPANNER_NUM_CHANNELS
+              value: "10"
+            - name: SPANNER_PROJECT_ID
+              value: "span-cloud-testing"
+            - name: SPANNER_INSTANCE_ID
+              value: "irahul-load-test"
+            - name: SPANNER_DATABASE_ID
+              value: "db"
+            - name: NUM_ROWS
+              value: "10000000"
+            - name: MAX_STALENESS_SECONDS
+              value: "60"
+            - name: ENABLE_CLOUD_MONITORING
+              value: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: spanner-ns
+  name: irahul-node-stale-query-release-a
+  labels:
+    workload: stale-query
+    client: nodejs-spanner
+    comparison: release-a
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: irahul-node-stale-query-release-a
+  template:
+    metadata:
+      labels:
+        app: irahul-node-stale-query-release-a
+        workload: stale-query
+        client: nodejs-spanner
+        comparison: release-a
+    spec:
+      containers:
+        - name: stale-query
+          image: us-central1-docker.pkg.dev/span-cloud-testing/irahul-images/irahul-node-client:release-a
+          imagePullPolicy: Always
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          env:
+            - name: PROBE_TYPE
+              value: "stale_query"
+            - name: QPS
+              value: "400"
+            - name: OTEL_SERVICE_NAME
+              value: "irahul-node-stale-query-v8-6-0"
+            - name: COMPARISON_LABEL
+              value: "v8.6.0"
+            - name: SPANNER_PROJECT_ID
+              value: "span-cloud-testing"
+            - name: SPANNER_INSTANCE_ID
+              value: "irahul-load-test"
+            - name: SPANNER_DATABASE_ID
+              value: "db"
+            - name: NUM_ROWS
+              value: "10000000"
+            - name: MAX_STALENESS_SECONDS
+              value: "60"
+            - name: ENABLE_CLOUD_MONITORING
+              value: "true"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: spanner-ns
+  name: irahul-node-stale-query-release-b
+  labels:
+    workload: stale-query
+    client: nodejs-spanner
+    comparison: release-b
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: irahul-node-stale-query-release-b
+  template:
+    metadata:
+      labels:
+        app: irahul-node-stale-query-release-b
+        workload: stale-query
+        client: nodejs-spanner
+        comparison: release-b
+    spec:
+      containers:
+        - name: stale-query
+          image: us-central1-docker.pkg.dev/span-cloud-testing/irahul-images/irahul-node-client:release-b
+          imagePullPolicy: Always
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "1"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          env:
+            - name: PROBE_TYPE
+              value: "stale_query"
+            - name: QPS
+              value: "400"
+            - name: OTEL_SERVICE_NAME
+              value: "irahul-node-stale-query-v8-2-2"
+            - name: COMPARISON_LABEL
+              value: "v8.2.2"
+            - name: SPANNER_PROJECT_ID
+              value: "span-cloud-testing"
+            - name: SPANNER_INSTANCE_ID
+              value: "irahul-load-test"
+            - name: SPANNER_DATABASE_ID
+              value: "db"
+            - name: NUM_ROWS
+              value: "10000000"
+            - name: MAX_STALENESS_SECONDS
+              value: "60"
+            - name: ENABLE_CLOUD_MONITORING
+              value: "true"
