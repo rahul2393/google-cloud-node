@@ -56,6 +56,8 @@ spec:
               value: "db"
             - name: NUM_ROWS
               value: "10000000"
+            - name: FIXED_KEY
+              value: "1"
             - name: MAX_STALENESS_SECONDS
               value: "60"
             - name: ENABLE_CLOUD_MONITORING
@@ -111,6 +113,8 @@ spec:
               value: "db"
             - name: NUM_ROWS
               value: "10000000"
+            - name: FIXED_KEY
+              value: "1"
             - name: MAX_STALENESS_SECONDS
               value: "60"
             - name: ENABLE_CLOUD_MONITORING
@@ -166,6 +170,8 @@ spec:
               value: "db"
             - name: NUM_ROWS
               value: "10000000"
+            - name: FIXED_KEY
+              value: "1"
             - name: MAX_STALENESS_SECONDS
               value: "60"
             - name: ENABLE_CLOUD_MONITORING

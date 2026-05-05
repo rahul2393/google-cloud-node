@@ -32,6 +32,7 @@ kubectl -n spanner-ns get pods -l workload=stale-query
 - `QPS`: target QPS per pod
 - `SPANNER_PROJECT_ID`, `SPANNER_INSTANCE_ID`, `SPANNER_DATABASE_ID`
 - `NUM_ROWS`: random key range `[0, NUM_ROWS)`
+- `FIXED_KEY`: if set, query/read/write same key instead of random `[0, NUM_ROWS)`
 - `MAX_STALENESS_SECONDS`: stale query/read bound
 - `ENABLE_CLOUD_MONITORING`: write custom metrics
 - `SPANNER_LOG_CHANNEL_COUNTS`: log per-channel request counts
