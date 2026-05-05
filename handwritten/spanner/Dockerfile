@@ -23,7 +23,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY bypass-performance/package*.json ./
 RUN npm install --omit=dev
-COPY bypass-performance/main.js ./main.js
+COPY --chown=node:node bypass-performance/main.js ./main.js
+RUN chmod 0555 /app/main.js
 USER node
 ENTRYPOINT ["node", "/app/main.js"]
 
