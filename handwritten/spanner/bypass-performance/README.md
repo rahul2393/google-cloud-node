@@ -34,6 +34,8 @@ kubectl -n spanner-ns get pods -l workload=stale-query
 - `NUM_ROWS`: random key range `[0, NUM_ROWS)`
 - `MAX_STALENESS_SECONDS`: stale query/read bound
 - `ENABLE_CLOUD_MONITORING`: write custom metrics
+- `SPANNER_LOG_CHANNEL_COUNTS`: log per-channel request counts
+- `CHANNEL_COUNTS_INTERVAL_MS`: per-channel count interval, default `60000`
 - `METRICS_PREFIX`: default `custom.googleapis.com/irahul/node`
 
 Metrics:

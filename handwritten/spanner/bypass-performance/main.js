@@ -34,6 +34,8 @@ const cfg = {
   metricsPrefix: envString('METRICS_PREFIX', 'custom.googleapis.com/irahul/node'),
   metricsIntervalMs: envNumber('METRICS_INTERVAL_MS', 10000),
   logIntervalMs: envNumber('LOG_INTERVAL_MS', 10000),
+  logChannelCounts: envBool('SPANNER_LOG_CHANNEL_COUNTS', false),
+  channelCountsIntervalMs: envNumber('CHANNEL_COUNTS_INTERVAL_MS', 60000),
 };
 
 if (cfg.qps <= 0) throw new Error(`QPS must be > 0, got ${cfg.qps}`);
@@ -150,6 +152,72 @@ class MetricsReporter {
         },
       ],
     };
+  }
+}
+
+
+class ChannelCounter {
+  constructor(spanner) {
+    this.countsByChannel = new Map();
+    this.countsByChannelAndMethod = new Map();
+    this.total = 0;
+    this.originalPrepareGapicRequest = spanner.prepareGapicRequest_.bind(spanner);
+    spanner.prepareGapicRequest_ = (config, callback) => {
+      this.record(config);
+      return this.originalPrepareGapicRequest(config, callback);
+    };
+  }
+
+  start() {
+    this.interval = setInterval(() => {
+      console.log(JSON.stringify(this.snapshotAndReset()));
+    }, cfg.channelCountsIntervalMs);
+  }
+
+  stop() {
+    clearInterval(this.interval);
+  }
+
+  record(config) {
+    if (!config || config.client !== 'SpannerClient') return;
+    const method = config.method || 'unknown';
+    const channel = channelLabel(config.channelHint);
+    this.total++;
+    this.countsByChannel.set(channel, (this.countsByChannel.get(channel) || 0) + 1);
+    if (!this.countsByChannelAndMethod.has(channel)) {
+      this.countsByChannelAndMethod.set(channel, new Map());
+    }
+    const methodCounts = this.countsByChannelAndMethod.get(channel);
+    methodCounts.set(method, (methodCounts.get(method) || 0) + 1);
+  }
+
+  snapshotAndReset() {
+    const byChannel = {};
+    const byChannelMethod = {};
+    const channelNames = new Set();
+    for (let i = 1; i <= cfg.numChannels; i++) channelNames.add(String(i));
+    for (const channel of this.countsByChannel.keys()) channelNames.add(channel);
+    for (const channel of this.countsByChannelAndMethod.keys()) channelNames.add(channel);
+    for (const channel of [...channelNames].sort(compareChannelLabels)) {
+      byChannel[channel] = this.countsByChannel.get(channel) || 0;
+      byChannelMethod[channel] = {};
+      const methodCounts = this.countsByChannelAndMethod.get(channel) || new Map();
+      for (const [method, count] of [...methodCounts.entries()].sort()) {
+        byChannelMethod[channel][method] = count;
+      }
+    }
+    const snapshot = {
+      message: 'spanner_channel_counts',
+      interval_ms: cfg.channelCountsIntervalMs,
+      configured_num_channels: cfg.numChannels,
+      total: this.total,
+      by_channel: byChannel,
+      by_channel_method: byChannelMethod,
+    };
+    this.countsByChannel.clear();
+    this.countsByChannelAndMethod.clear();
+    this.total = 0;
+    return snapshot;
   }
 }
 
@@ -338,10 +406,14 @@ async function main() {
       packageVersion: clientPackage.version,
       nodeVersion: process.version,
       hostname,
+      logChannelCounts: cfg.logChannelCounts,
+      channelCountsIntervalMs: cfg.channelCountsIntervalMs,
     }),
   );
 
   const spanner = new Spanner(spannerOptions);
+  const channelCounter = cfg.logChannelCounts ? new ChannelCounter(spanner) : null;
+  channelCounter?.start();
   const database = spanner.instance(cfg.instanceId).database(cfg.databaseId, {
     min: envNumber('SESSION_POOL_MIN', 25),
     max: envNumber('SESSION_POOL_MAX', 400),
@@ -354,6 +426,10 @@ async function main() {
   const shutdown = async signal => {
     console.log(JSON.stringify({message: 'shutdown_start', signal}));
     runner.stop();
+    channelCounter?.stop();
+    if (channelCounter) {
+      console.log(JSON.stringify(channelCounter.snapshotAndReset()));
+    }
     try {
       await database.close();
     } catch (err) {
@@ -392,6 +468,18 @@ function loadSpannerPackage() {
       throw err;
     }
   }
+}
+
+
+function channelLabel(channelHint) {
+  if (typeof channelHint !== 'number' || cfg.numChannels <= 0) return 'default';
+  return String((channelHint % cfg.numChannels) + 1);
+}
+
+function compareChannelLabels(a, b) {
+  if (a === 'default') return 1;
+  if (b === 'default') return -1;
+  return Number(a) - Number(b);
 }
 
 function randomKey() {

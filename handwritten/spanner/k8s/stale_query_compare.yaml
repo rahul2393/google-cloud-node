@@ -44,6 +44,10 @@ spec:
             # In this branch, SPANNER_NUM_CHANNELS disables grpc-gcp.
             - name: SPANNER_NUM_CHANNELS
               value: "10"
+            - name: SPANNER_LOG_CHANNEL_COUNTS
+              value: "true"
+            - name: CHANNEL_COUNTS_INTERVAL_MS
+              value: "60000"
             - name: SPANNER_PROJECT_ID
               value: "span-cloud-testing"
             - name: SPANNER_INSTANCE_ID

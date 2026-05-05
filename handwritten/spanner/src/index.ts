@@ -104,6 +104,117 @@ import {MetricsTracer} from './metrics/metrics-tracer';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const gcpApiConfig = require('./spanner_grpc_config.json');
 
+
+type ChannelSelectionMethodCounts = Map<string, number>;
+type ChannelSelectionCounts = Map<string, ChannelSelectionMethodCounts>;
+
+let channelSelectionCounts: ChannelSelectionCounts | null = null;
+let channelSelectionTotal = 0;
+let channelSelectionInterval: NodeJS.Timeout | null = null;
+let channelSelectionLastNumChannels = 0;
+
+function shouldLogChannelSelectionCounts(): boolean {
+  return process.env.SPANNER_LOG_CHANNEL_COUNTS === 'true';
+}
+
+function channelSelectionIntervalMs(): number {
+  const parsed = Number(process.env.CHANNEL_COUNTS_INTERVAL_MS || 60000);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 60000;
+}
+
+function ensureChannelSelectionLogger(): ChannelSelectionCounts {
+  if (!channelSelectionCounts) {
+    channelSelectionCounts = new Map();
+  }
+  if (!channelSelectionInterval) {
+    channelSelectionInterval = setInterval(
+      logAndResetChannelSelectionCounts,
+      channelSelectionIntervalMs(),
+    );
+    channelSelectionInterval.unref?.();
+  }
+  return channelSelectionCounts;
+}
+
+function recordChannelSelection(
+  clientName: string,
+  method: string | undefined,
+  channelHint: number | undefined,
+  numChannels: number,
+  clientKey: string,
+): void {
+  if (!shouldLogChannelSelectionCounts() || clientName !== 'SpannerClient') {
+    return;
+  }
+  channelSelectionLastNumChannels = numChannels;
+  const counts = ensureChannelSelectionLogger();
+  const channel = channelSelectionLabel(channelHint, numChannels, clientKey);
+  const methodName = method || 'unknown';
+  if (!counts.has(channel)) {
+    counts.set(channel, new Map());
+  }
+  const methodCounts = counts.get(channel)!;
+  methodCounts.set(methodName, (methodCounts.get(methodName) || 0) + 1);
+  channelSelectionTotal++;
+}
+
+function channelSelectionLabel(
+  channelHint: number | undefined,
+  numChannels: number,
+  clientKey: string,
+): string {
+  if (typeof channelHint === 'number' && numChannels > 0) {
+    return String((channelHint % numChannels) + 1);
+  }
+  return clientKey;
+}
+
+function logAndResetChannelSelectionCounts(): void {
+  if (!channelSelectionCounts) {
+    return;
+  }
+  const byChannel: {[key: string]: number} = {};
+  const byChannelMethod: {[key: string]: {[method: string]: number}} = {};
+  const channels = new Set<string>();
+  for (let i = 1; i <= channelSelectionLastNumChannels; i++) {
+    channels.add(String(i));
+  }
+  for (const channel of channelSelectionCounts.keys()) {
+    channels.add(channel);
+  }
+  for (const channel of [...channels].sort(compareChannelSelectionLabels)) {
+    const methodCounts = channelSelectionCounts.get(channel) || new Map();
+    let total = 0;
+    byChannelMethod[channel] = {};
+    for (const [method, count] of [...methodCounts.entries()].sort()) {
+      byChannelMethod[channel][method] = count;
+      total += count;
+    }
+    byChannel[channel] = total;
+  }
+  console.log(
+    JSON.stringify({
+      message: 'spanner_library_channel_counts',
+      interval_ms: channelSelectionIntervalMs(),
+      configured_num_channels: channelSelectionLastNumChannels,
+      total: channelSelectionTotal,
+      by_channel: byChannel,
+      by_channel_method: byChannelMethod,
+    }),
+  );
+  channelSelectionCounts.clear();
+  channelSelectionTotal = 0;
+}
+
+function compareChannelSelectionLabels(a: string, b: string): number {
+  const aNum = Number(a);
+  const bNum = Number(b);
+  if (Number.isFinite(aNum) && Number.isFinite(bNum)) {
+    return aNum - bNum;
+  }
+  return a.localeCompare(b);
+}
+
 export type IOperation = instanceAdmin.longrunning.IOperation;
 
 export type GetInstancesOptions = PagedOptionsWithFilter;
@@ -1730,6 +1841,13 @@ class Spanner extends GrpcService {
       }
       const clientKey =
         channelHint === undefined ? clientName : `${clientName}:${channelHint}`;
+      recordChannelSelection(
+        clientName,
+        config.method,
+        channelHint,
+        this._numChannels,
+        clientKey,
+      );
       try {
         if (!this.clients_.has(clientKey)) {
           this.clients_.set(clientKey, new v1[clientName](this.options));
