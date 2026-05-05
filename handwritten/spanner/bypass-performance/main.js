@@ -8,7 +8,9 @@ const spannerPackage = loadSpannerPackage();
 const {Spanner} = spannerPackage;
 
 const cfg = {
+  loadMode: envString('LOAD_MODE', '').trim(),
   qps: envNumber('QPS', 400),
+  concurrency: envNumber('CONCURRENCY', 0),
   scheduleIntervalMs: envNumber('SCHEDULE_INTERVAL_MS', 10),
   warmupCycles: envNumber('WARMUP_CYCLES', 1000),
   workload: envString('PROBE_TYPE', 'stale_query'),
@@ -39,7 +41,16 @@ const cfg = {
   channelCountsIntervalMs: envNumber('CHANNEL_COUNTS_INTERVAL_MS', 60000),
 };
 
-if (cfg.qps <= 0) throw new Error(`QPS must be > 0, got ${cfg.qps}`);
+if (!cfg.loadMode) {
+  cfg.loadMode = cfg.concurrency > 0 ? 'concurrency' : 'qps';
+}
+if (!['qps', 'concurrency'].includes(cfg.loadMode)) {
+  throw new Error(`LOAD_MODE must be qps or concurrency, got ${cfg.loadMode}`);
+}
+if (cfg.loadMode === 'qps' && cfg.qps <= 0) throw new Error(`QPS must be > 0, got ${cfg.qps}`);
+if (cfg.loadMode === 'concurrency' && cfg.concurrency <= 0) {
+  throw new Error(`CONCURRENCY must be > 0 in concurrency mode, got ${cfg.concurrency}`);
+}
 if (cfg.numRows <= 0) throw new Error(`NUM_ROWS must be > 0, got ${cfg.numRows}`);
 
 const hostname = os.hostname();
@@ -180,6 +191,31 @@ class ProbeRunner {
   }
 
   start() {
+    if (cfg.loadMode === 'concurrency') {
+      this.startConcurrency();
+    } else {
+      this.startQps();
+    }
+
+    this.reportInterval = setInterval(async () => {
+      const snap = this.reporter.snapshotAndReset();
+      console.log(
+        JSON.stringify({
+          message: 'probe_stats',
+          workload: cfg.workload,
+          load_mode: cfg.loadMode,
+          qps_target: cfg.loadMode === 'qps' ? cfg.qps : undefined,
+          concurrency_target: cfg.loadMode === 'concurrency' ? cfg.concurrency : undefined,
+          version: clientVersion,
+          inflight: this.inflight,
+          ...roundSnapshot(snap),
+        }),
+      );
+      await this.reporter.writeCloudMonitoring(snap);
+    }, Math.max(cfg.logIntervalMs, cfg.metricsIntervalMs));
+  }
+
+  startQps() {
     const intervalMs = Math.max(1, cfg.scheduleIntervalMs);
     this.interval = setInterval(() => {
       if (this.stopped) return;
@@ -193,21 +229,29 @@ class ProbeRunner {
         });
       }
     }, intervalMs);
+  }
 
-    this.reportInterval = setInterval(async () => {
-      const snap = this.reporter.snapshotAndReset();
-      console.log(
-        JSON.stringify({
-          message: 'probe_stats',
-          workload: cfg.workload,
-          qps_target: cfg.qps,
-          version: clientVersion,
-          inflight: this.inflight,
-          ...roundSnapshot(snap),
-        }),
-      );
-      await this.reporter.writeCloudMonitoring(snap);
-    }, Math.max(cfg.logIntervalMs, cfg.metricsIntervalMs));
+  startConcurrency() {
+    this.workers = [];
+    for (let i = 0; i < cfg.concurrency; i++) {
+      this.workers.push(this.runWorker(i));
+    }
+  }
+
+  async runWorker(workerIndex) {
+    while (!this.stopped) {
+      try {
+        await this.runOne();
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            message: 'probe_worker_error',
+            workerIndex,
+            error: err.message,
+          }),
+        );
+      }
+    }
   }
 
   stop() {
@@ -325,7 +369,9 @@ async function main() {
   console.log(
     JSON.stringify({
       message: 'prober_start',
+      loadMode: cfg.loadMode,
       qps: cfg.qps,
+      concurrency: cfg.concurrency,
       workload: cfg.workload,
       projectId: cfg.projectId,
       instanceId: cfg.instanceId,

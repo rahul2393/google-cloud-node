@@ -29,7 +29,9 @@ kubectl -n spanner-ns get pods -l workload=stale-query
 ## Useful env vars
 
 - `PROBE_TYPE`: `stale_query`, `strong_query`, `stale_read`, `strong_read`, `write`
-- `QPS`: target QPS per pod
+- `LOAD_MODE`: `qps` (default) or `concurrency`
+- `QPS`: target QPS per pod when `LOAD_MODE=qps`
+- `CONCURRENCY`: number of continuously running async probes when `LOAD_MODE=concurrency`
 - `SPANNER_PROJECT_ID`, `SPANNER_INSTANCE_ID`, `SPANNER_DATABASE_ID`
 - `NUM_ROWS`: random key range `[0, NUM_ROWS)`
 - `FIXED_KEY`: if set, query/read/write same key instead of random `[0, NUM_ROWS)`
@@ -45,3 +47,11 @@ Metrics:
 - `${METRICS_PREFIX}/op_count`
 - `${METRICS_PREFIX}/error_count`
 - `${METRICS_PREFIX}/latency_ms` with `percentile=p50|p90|p99|avg|max`
+
+Concurrency mode example:
+
+```sh
+LOAD_MODE=concurrency CONCURRENCY=110 PROBE_TYPE=stale_query node bypass-performance/main.js
+```
+
+In concurrency mode, QPS is emergent: `QPS ~= CONCURRENCY / avg_latency_seconds`.
