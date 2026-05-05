@@ -3,7 +3,12 @@
 FROM node:22-bookworm-slim AS local-lib
 WORKDIR /workspace/spanner
 COPY package*.json ./
-RUN npm ci --ignore-scripts
+RUN if [ -f package-lock.json ]; then \
+      npm ci --ignore-scripts; \
+    else \
+      echo "package-lock.json not found; using npm install"; \
+      npm install --ignore-scripts; \
+    fi
 COPY . .
 RUN npm run compile \
  && mkdir -p /tmp/spanner-pack \
