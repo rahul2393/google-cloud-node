@@ -3,7 +3,13 @@
 
 const os = require('os');
 const {performance} = require('perf_hooks');
-const {MetricServiceClient} = require('@google-cloud/monitoring').v3;
+const {MetricExporter} = require('@google-cloud/opentelemetry-cloud-monitoring-exporter');
+const {
+  ExplicitBucketHistogramAggregation,
+  MeterProvider,
+  PeriodicExportingMetricReader,
+  View,
+} = require('@opentelemetry/sdk-metrics');
 const spannerPackage = loadSpannerPackage();
 const {Spanner} = spannerPackage;
 
@@ -56,118 +62,128 @@ if (cfg.numRows <= 0) throw new Error(`NUM_ROWS must be > 0, got ${cfg.numRows}`
 const hostname = os.hostname();
 const clientPackage = spannerPackage.packageJson;
 const clientVersion = cfg.comparisonLabel || clientPackage.version || 'unknown';
+const LATENCY_BUCKET_BOUNDS_MS = [
+  0.0, 0.01, 0.05, 0.1, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55,
+  0.575, 0.6, 0.625, 0.65, 0.675, 0.7, 0.725, 0.75, 0.775, 0.8, 0.825,
+  0.85, 0.875, 0.9, 0.925, 0.95, 0.975, 1.0, 1.05, 1.1, 1.15, 1.2, 1.25,
+  1.3, 1.35, 1.4, 1.45, 1.5, 1.55, 1.6, 1.65, 1.7, 1.75, 1.8, 1.85,
+  1.9, 1.95, 2.0, 2.05, 2.1, 2.15, 2.2, 2.25, 2.3, 2.35, 2.4, 2.45,
+  2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7,
+  3.8, 3.9, 4.0, 4.2, 4.5, 4.8, 5.0, 5.5, 6.0, 7.0, 8.0, 10.0, 13.0,
+  16.0, 20.0, 25.0, 30.0, 40.0, 50.0, 65.0, 80.0, 100.0, 130.0, 160.0,
+  200.0, 250.0, 300.0, 400.0, 500.0, 650.0, 800.0, 1000.0, 2000.0, 5000.0,
+  10000.0, 20000.0, 50000.0, 100000.0,
+];
 
 class MetricsReporter {
   constructor() {
-    this.reset();
-    this.client = cfg.enableCloudMonitoring ? new MetricServiceClient() : null;
-    this.projectPath = this.client?.projectPath(cfg.telemetryProjectId);
-    this.resource = {
-      type: 'global',
-      labels: {project_id: cfg.telemetryProjectId},
-    };
     this.baseLabels = {
       service: sanitizeLabel(cfg.serviceName),
       workload: sanitizeLabel(cfg.workload),
       version: sanitizeLabel(clientVersion),
       host: sanitizeLabel(hostname),
     };
+    this.reset();
+    if (cfg.enableCloudMonitoring) {
+      this.exporter = new MetricExporter({
+        projectId: cfg.telemetryProjectId,
+        prefix: cfg.metricsPrefix,
+      });
+      this.reader = new PeriodicExportingMetricReader({
+        exporter: this.exporter,
+        exportIntervalMillis: cfg.metricsIntervalMs,
+      });
+      this.meterProvider = new MeterProvider({
+        readers: [this.reader],
+        views: [
+          new View({
+            instrumentName: 'latency_ms',
+            aggregation: new ExplicitBucketHistogramAggregation(LATENCY_BUCKET_BOUNDS_MS),
+          }),
+        ],
+      });
+      this.meter = this.meterProvider.getMeter('spanner-bypass-performance');
+      this.requestCounter = this.meter.createCounter('op_count', {
+        description: 'Total requests processed by the prober.',
+        unit: '1',
+      });
+      this.errorCounter = this.meter.createCounter('error_count', {
+        description: 'Total failed requests processed by the prober.',
+        unit: '1',
+      });
+      this.latencyHistogram = this.meter.createHistogram('latency_ms', {
+        description: 'Latency of requests processed by the prober.',
+        unit: 'ms',
+      });
+      this.rpsGauge = this.meter.createObservableGauge('ops_per_second', {
+        description: 'Requests per second processed by the prober.',
+        unit: '1/s',
+      });
+      this.rpsGauge.addCallback(result => this.observeRps(result));
+    }
   }
 
   reset() {
-    this.latencies = [];
+    this.latencyStats = createLatencyStats();
     this.count = 0;
     this.errors = 0;
     this.windowStart = Date.now();
+    this.rpsCount = 0;
+    this.rpsWindowStart = Date.now();
   }
 
-  recordLatency(ms) {
+  updateProbeStats(start) {
+    const latency = normalizeLatency(performance.now() - start);
     this.count++;
-    this.latencies.push(ms);
+    this.rpsCount++;
+    recordLogLatencyStats(this.latencyStats, latency);
+    this.requestCounter?.add(1, this.baseLabels);
+    this.latencyHistogram?.record(latency, this.baseLabels);
   }
 
   recordError() {
     this.errors++;
+    this.errorCounter?.add(1, this.baseLabels);
+  }
+
+  observeRps(result) {
+    const now = Date.now();
+    const elapsedSeconds = Math.max(0.001, (now - this.rpsWindowStart) / 1000);
+    result.observe(this.rpsCount / elapsedSeconds, this.baseLabels);
+    this.rpsCount = 0;
+    this.rpsWindowStart = now;
   }
 
   snapshotAndReset() {
     const now = Date.now();
     const elapsedSeconds = Math.max(0.001, (now - this.windowStart) / 1000);
-    const values = this.latencies.splice(0, this.latencies.length);
+    const latencyStats = this.latencyStats;
     const snap = {
       elapsedSeconds,
       count: this.count,
       errors: this.errors,
       rps: this.count / elapsedSeconds,
-      p50: percentile(values, 50),
-      p90: percentile(values, 90),
-      p99: percentile(values, 99),
-      max: values.length ? Math.max(...values) : 0,
-      avg: values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0,
+      p50: distributionPercentile(latencyStats, 50),
+      p90: distributionPercentile(latencyStats, 90),
+      p99: distributionPercentile(latencyStats, 99),
+      max: latencyStats.count ? latencyStats.max : 0,
+      avg: latencyStats.count ? latencyStats.mean : 0,
     };
     this.count = 0;
     this.errors = 0;
+    this.latencyStats = createLatencyStats();
     this.windowStart = now;
     return snap;
   }
 
-  async writeCloudMonitoring(snap) {
-    if (!this.client) return;
-    const endTime = toProtoTimestamp(Date.now());
-    const points = [];
-    points.push(this.doubleSeries('ops_per_second', {}, snap.rps, endTime));
-    points.push(this.doubleSeries('op_count', {}, snap.count, endTime));
-    points.push(this.doubleSeries('error_count', {}, snap.errors, endTime));
-    for (const [percentileName, value] of Object.entries({
-      p50: snap.p50,
-      p90: snap.p90,
-      p99: snap.p99,
-      avg: snap.avg,
-      max: snap.max,
-    })) {
-      points.push(
-        this.doubleSeries(
-          'latency_ms',
-          {percentile: percentileName},
-          Number.isFinite(value) ? value : 0,
-          endTime,
-        ),
-      );
-    }
-    try {
-      await this.client.createTimeSeries({
-        name: this.projectPath,
-        timeSeries: points,
-      });
-    } catch (err) {
-      console.error(
-        JSON.stringify({
-          message: 'Cloud Monitoring write failed',
-          error: err.message,
-          code: err.code,
-        }),
-      );
-    }
+  async forceFlush() {
+    await this.meterProvider?.forceFlush();
   }
 
-  doubleSeries(name, labels, value, endTime) {
-    return {
-      metric: {
-        type: `${cfg.metricsPrefix}/${name}`,
-        labels: {...this.baseLabels, ...labels},
-      },
-      resource: this.resource,
-      points: [
-        {
-          interval: {endTime},
-          value: {doubleValue: Number(value)},
-        },
-      ],
-    };
+  async shutdown() {
+    await this.meterProvider?.shutdown();
   }
 }
-
-
 
 class ProbeRunner {
   constructor(database, reporter) {
@@ -211,7 +227,6 @@ class ProbeRunner {
           ...roundSnapshot(snap),
         }),
       );
-      await this.reporter.writeCloudMonitoring(snap);
     }, Math.max(cfg.logIntervalMs, cfg.metricsIntervalMs));
   }
 
@@ -265,7 +280,7 @@ class ProbeRunner {
     const start = performance.now();
     try {
       await this.probeOnce();
-      this.reporter.recordLatency(performance.now() - start);
+      this.reporter.updateProbeStats(start);
     } catch (err) {
       this.reporter.recordError();
       console.error(
@@ -409,6 +424,12 @@ async function main() {
     console.log(JSON.stringify({message: 'shutdown_start', signal}));
     runner.stop();
     try {
+      await reporter.forceFlush();
+      await reporter.shutdown();
+    } catch (err) {
+      console.error(JSON.stringify({message: 'metrics_shutdown_error', error: err.message}));
+    }
+    try {
       await database.close();
     } catch (err) {
       console.error(JSON.stringify({message: 'database_close_error', error: err.message}));
@@ -466,11 +487,55 @@ function randomString(length) {
   return out;
 }
 
-function percentile(values, p) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.ceil((p / 100) * sorted.length) - 1;
-  return sorted[Math.max(0, Math.min(sorted.length - 1, idx))];
+function createLatencyStats() {
+  return {
+    count: 0,
+    mean: 0,
+    sumOfSquaredDeviation: 0,
+    max: 0,
+    bucketCounts: new Array(LATENCY_BUCKET_BOUNDS_MS.length + 1).fill(0),
+  };
+}
+
+function recordLogLatencyStats(stats, value) {
+  const latency = normalizeLatency(value);
+  const previousMean = stats.mean;
+  stats.count++;
+  stats.mean += (latency - stats.mean) / stats.count;
+  stats.sumOfSquaredDeviation += (latency - previousMean) * (latency - stats.mean);
+  stats.max = Math.max(stats.max, latency);
+  stats.bucketCounts[findLatencyBucketIndex(latency)]++;
+}
+
+function normalizeLatency(value) {
+  return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function findLatencyBucketIndex(latency) {
+  let low = 0;
+  let high = LATENCY_BUCKET_BOUNDS_MS.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (latency < LATENCY_BUCKET_BOUNDS_MS[mid]) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return low;
+}
+
+function distributionPercentile(stats, p) {
+  if (!stats.count) return 0;
+  const rank = Math.max(1, Math.ceil((p / 100) * stats.count));
+  let cumulative = 0;
+  for (let i = 0; i < stats.bucketCounts.length; i++) {
+    cumulative += stats.bucketCounts[i];
+    if (cumulative >= rank) {
+      return i < LATENCY_BUCKET_BOUNDS_MS.length ? LATENCY_BUCKET_BOUNDS_MS[i] : stats.max;
+    }
+  }
+  return stats.max;
 }
 
 function roundSnapshot(snap) {
@@ -489,11 +554,6 @@ function roundSnapshot(snap) {
 
 function round(value) {
   return Number(value.toFixed(2));
-}
-
-function toProtoTimestamp(ms) {
-  const seconds = Math.floor(ms / 1000);
-  return {seconds, nanos: (ms - seconds * 1000) * 1e6};
 }
 
 function sanitizeLabel(value) {

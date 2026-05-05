@@ -46,7 +46,11 @@ Metrics:
 - `${METRICS_PREFIX}/ops_per_second`
 - `${METRICS_PREFIX}/op_count`
 - `${METRICS_PREFIX}/error_count`
-- `${METRICS_PREFIX}/latency_ms` with `percentile=p50|p90|p99|avg|max`
+- `${METRICS_PREFIX}/latency_ms` as a distribution metric with explicit millisecond buckets.
+  Use Cloud Monitoring percentile aligners for p50/p90/p99.
+
+Metrics are recorded with the OpenTelemetry metrics SDK. The prober uses OTel
+counter/histogram instruments and a Cloud Monitoring exporter.
 
 Concurrency mode example:
 
