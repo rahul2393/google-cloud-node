@@ -5,10 +5,9 @@ const os = require('os');
 const {performance} = require('perf_hooks');
 const {MetricExporter} = require('@google-cloud/opentelemetry-cloud-monitoring-exporter');
 const {
-  ExplicitBucketHistogramAggregation,
+  AggregationType,
   MeterProvider,
   PeriodicExportingMetricReader,
-  View,
 } = require('@opentelemetry/sdk-metrics');
 const spannerPackage = loadSpannerPackage();
 const {Spanner} = spannerPackage;
@@ -96,10 +95,13 @@ class MetricsReporter {
       this.meterProvider = new MeterProvider({
         readers: [this.reader],
         views: [
-          new View({
+          {
             instrumentName: 'latency_ms',
-            aggregation: new ExplicitBucketHistogramAggregation(LATENCY_BUCKET_BOUNDS_MS),
-          }),
+            aggregation: {
+              type: AggregationType.EXPLICIT_BUCKET_HISTOGRAM,
+              options: {boundaries: LATENCY_BUCKET_BOUNDS_MS},
+            },
+          },
         ],
       });
       this.meter = this.meterProvider.getMeter('spanner-bypass-performance');
